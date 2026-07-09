@@ -1,0 +1,108 @@
+trigger: none
+pr: none
+
+parameters:
+- name: mode
+  displayName: Run mode
+  type: string
+  default: audit
+  values:
+  - audit
+  - enforce
+
+- name: runDemoRemediation
+  displayName: Run safe demo remediation
+  type: boolean
+  default: false
+
+pool:
+  vmImage: windows-latest
+
+variables:
+- name: pythonVersion
+  value: '3.11'
+- name: reportOutput
+  value: '$(Build.ArtifactStagingDirectory)\\reports'
+
+stages:
+- stage: Validate
+  displayName: Validate scripts
+  jobs:
+  - job: lint_and_smoke
+    displayName: Lint and smoke test
+    steps:
+    - checkout: self
+
+    - task: UsePythonVersion@0
+      displayName: Use Python $(pythonVersion)
+      inputs:
+        versionSpec: '$(pythonVersion)'
+
+    - powershell: |
+        Write-Host "Checking PowerShell syntax for demo remediation script..."
+        $null = [ScriptBlock]::Create((Get-Content -Path "Scripts\\Remediation\\Set-IHCSafeDemoRegistryKey.ps1" -Raw))
+        Write-Host "PowerShell syntax check passed."
+      displayName: PowerShell syntax check
+
+    - script: |
+        python -m pip install --upgrade pip
+        if exist backend\\requirements.txt pip install -r backend\\requirements.txt
+      displayName: Install Python dependencies
+
+- stage: Audit
+  displayName: Collect and analyze (read-only)
+  dependsOn: Validate
+  jobs:
+  - job: run_audit
+    displayName: Run Intune health check
+    steps:
+    - checkout: self
+
+    - powershell: |
+        New-Item -ItemType Directory -Path "$(reportOutput)" -Force | Out-Null
+        Write-Host "Run mode: ${{ parameters.mode }}"
+        if (-not $env:AZURE_TENANT_ID -or -not $env:AZURE_CLIENT_ID) {
+          Write-Warning "AZURE_TENANT_ID or AZURE_CLIENT_ID not set. Skipping Graph audit run for now."
+          "Graph audit skipped because required environment variables are missing." |
+            Out-File -FilePath "$(reportOutput)\\README.txt" -Encoding utf8
+          exit 0
+        }
+
+        Write-Host "Running Python backend audit collection/report..."
+        $env:OUTPUT_DIR = "$(reportOutput)"
+        python backend\\ihc_run.py
+      displayName: Run health check
+      continueOnError: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: Publish reports artifact
+      inputs:
+        PathtoPublish: '$(reportOutput)'
+        ArtifactName: 'intune-health-reports'
+        publishLocation: 'Container'
+
+- stage: EnforceDemo
+  displayName: Safe demo remediation (optional)
+  dependsOn: Audit
+  condition: and(succeededOrFailed(), eq('${{ parameters.mode }}', 'enforce'), eq('${{ parameters.runDemoRemediation }}', true))
+  jobs:
+  - deployment: run_demo_remediation
+    displayName: Execute safe HKCU registry demo remediation
+    environment: intune-demo-environment
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          - powershell: |
+              Write-Host "Running SAFE demo remediation script..."
+              .\\Scripts\\Remediation\\Set-IHCSafeDemoRegistryKey.ps1 -Verbose
+            displayName: Run safe remediation
+
+          - powershell: |
+              Write-Host "Verifying key/value exists..."
+              Get-ItemProperty -Path "HKCU:\\Software\\HTMD\\IntuneAutomationDemo" -Name "LastRunUtc" |
+                Select-Object LastRunUtc |
+                Format-Table -AutoSize
+            displayName: Verify remediation result
