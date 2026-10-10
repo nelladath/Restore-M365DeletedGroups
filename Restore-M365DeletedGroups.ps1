@@ -1,44 +1,84 @@
-﻿﻿##########################################################################
-
-#Restore-M365DeletedGroups.ps1
-#Author : Sujin Nelladath
-#LinkedIn : https://www.linkedin.com/in/sujin-nelladath-8911968a/
-
+############################################################################
+# Restore-M365DeletedGroups.ps1
+# Author : Sujin Nelladath
 ############################################################################
 
-# Install Microsoft Graph module
+# Install Microsoft Graph module (if required)
 Install-Module Microsoft.Graph -Force -Scope CurrentUser
 
-
-# Connect to Microsoft Graph with required scope
+# Connect to Graph
 Connect-MgGraph -Scopes "Group.ReadWrite.All"
 
-# Prompt user for group name
-$GroupName = Read-Host "Enter the name of the Microsoft 365 group you want to restore"
+# Prompt for group names
+$GroupNames = Read-Host "Enter deleted group names (comma separated)"
 
-# Fetch all deleted groups
-$deletedGroups = Get-MgDirectoryDeletedGroup
+# Convert to array and trim spaces
+$GroupNamesArray = $GroupNames.Split(",") | ForEach-Object { $_.Trim() }
 
-# Find the group by display name
-$targetGroup = $deletedGroups | Where-Object { $_.DisplayName -eq $GroupName }
+# Fetch all deleted groups once
+$DeletedGroups = Get-MgDirectoryDeletedGroup -All
 
-if (!$targetGroup) 
+$SuccessCount = 0
+$FailedCount = 0
 
+foreach ($GroupName in $GroupNamesArray)
+{
+    Write-Host ""
+    Write-Host "Searching for group: $GroupName" -ForegroundColor Cyan
+
+    $MatchedGroups = $DeletedGroups | Where-Object {
+        $_.DisplayName -eq $GroupName
+    }
+
+    if (!$MatchedGroups)
     {
         Write-Host "Group '$GroupName' not found in deleted items." -ForegroundColor Red
-    } 
+        $FailedCount++
+        continue
+    }
 
-else 
+    foreach ($Group in $MatchedGroups)
     {
-        try 
-            {
-                Restore-MgDirectoryDeletedItem -DirectoryObjectId $targetGroup.Id
-                Write-Host "Group '$GroupName' has been successfully restored." -ForegroundColor Green
-            } 
+        # Determine Group Type
+        if ($Group.GroupTypes -contains "Unified")
+        {
+            $GroupType = "Microsoft 365 Group"
+        }
+        elseif ($Group.SecurityEnabled)
+        {
+            $GroupType = "Security Group"
+        }
+        else
+        {
+            $GroupType = "Unknown"
+        }
 
-        catch 
+        # Display group details
+        Write-Host ""
+        Write-Host "Group Found:" -ForegroundColor Green
+        Write-Host " Name      : $($Group.DisplayName)"
+        Write-Host " Type      : $GroupType"
+        Write-Host " Object Id : $($Group.Id)"
 
-            {
-                Write-Host "Failed to restore group '$GroupName'. Error: $_" -ForegroundColor Yellow
-            }
-     }
+        try
+        {
+            Restore-MgDirectoryDeletedItem -DirectoryObjectId $Group.Id
+
+            Write-Host " Successfully restored '$($Group.DisplayName)'" -ForegroundColor Green
+            $SuccessCount++
+        }
+        catch
+        {
+            Write-Host " Failed to restore '$($Group.DisplayName)'" -ForegroundColor Yellow
+            Write-Host " Error: $_"
+            $FailedCount++
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "=====================================" -ForegroundColor Cyan
+Write-Host "Restore Summary"
+Write-Host "=====================================" -ForegroundColor Cyan
+Write-Host "Restored Successfully : $SuccessCount" -ForegroundColor Green
+Write-Host "Failed                : $FailedCount" -ForegroundColor Red
